@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>영업 대시보드</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<style>
+  :root { --blue:#1d4ed8; --blue-light:#bfdbfe; --text:#111827; --sub:#6b7280; --line:#e5e7eb; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Pretendard',-apple-system,sans-serif; background:#fff; color:var(--text); padding:20px; max-width:1200px; margin:0 auto; }
+  h1 { font-size:22px; margin-bottom:16px; }
+  h2 { font-size:15px; margin-bottom:14px; }
+  .cards { display:grid; grid-template-columns:1.6fr 1fr 1fr 1fr; gap:12px; margin-bottom:12px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  .box { border:1px solid var(--line); border-radius:12px; padding:18px; min-width:0; }
+  .label { font-size:13px; color:var(--sub); margin-bottom:8px; }
+  .value { font-size:24px; font-weight:700; }
+  .big { font-size:34px; color:var(--blue); }
+  .small { font-size:12px; color:var(--sub); margin-top:6px; }
+  .bar-bg { height:8px; background:var(--line); border-radius:4px; margin-top:12px; overflow:hidden; }
+  .bar-fill { height:100%; background:var(--blue); border-radius:4px; }
+  svg { width:100%; height:auto; display:block; }
+  svg text { font-family:'Pretendard',sans-serif; }
+  .funnel-row { display:flex; justify-content:center; margin:0 auto; }
+  .funnel-bar { background:var(--blue); color:#fff; border-radius:6px; padding:9px 8px; text-align:center; font-size:13px; font-weight:600; white-space:nowrap; min-width:90px; }
+  .conv { text-align:center; font-size:12px; color:var(--sub); padding:5px 0; }
+  .final { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); text-align:center; font-size:14px; }
+  .final b { color:var(--blue); font-size:20px; }
+  .rank-row { display:grid; grid-template-columns:70px 1fr auto; gap:10px; align-items:center; margin-bottom:11px; font-size:13px; }
+  .rank-bar { height:14px; background:var(--line); border-radius:4px; overflow:hidden; }
+  .rank-bar div { height:100%; background:var(--blue); }
+  .rank-amt { font-weight:600; min-width:80px; text-align:right; }
+  .msg { padding:30px; text-align:center; color:var(--sub); }
+  .err { color:#b91c1c; }
+  @media (max-width:800px) {
+    .cards { grid-template-columns:1fr 1fr; }
+    .cards .box:first-child { grid-column:1 / -1; }
+    .grid { grid-template-columns:1fr; }
+    body { padding:14px; }
+  }
+</style>
+</head>
+<body>
+<h1>영업 대시보드</h1>
+<div id="status" class="msg">불러오는 중...</div>
+<div id="app" style="display:none">
+  <div class="cards">
+    <div class="box"><div class="label">이번 달 매출</div><div class="value big" id="c-rev"></div>
+      <div class="bar-bg"><div class="bar-fill" id="c-bar"></div></div><div class="small" id="c-rate"></div></div>
+    <div class="box"><div class="label">이번 달 목표</div><div class="value" id="c-target"></div><div class="small" id="c-remain"></div></div>
+    <div class="box"><div class="label">객단가</div><div class="value" id="c-avg"></div><div class="small">매출 ÷ 계약 건수</div></div>
+    <div class="box"><div class="label">계약 건수</div><div class="value" id="c-cnt"></div><div class="small">영업 마지막 단계</div></div>
+  </div>
+  <div class="grid">
+    <div class="box"><h2>월별 매출</h2><div id="chart"></div></div>
+    <div class="box"><h2>영업 단계</h2><div id="funnel"></div></div>
+  </div>
+  <div class="grid">
+    <div class="box"><h2>담당자별 순위</h2><div id="rank-person"></div></div>
+    <div class="box"><h2>상품별 순위</h2><div id="rank-product"></div></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  const { createClient } = supabase;
+  const db = createClient('https://yhzpmymvjpqvgzkjjddk.supabase.co', 'sb_publishable_K8geCy54t8gA0znrMNceLw_xFQR_8Hs');
+
+  const won = n => Math.round(n).toLocaleString('ko-KR') + '원';
+  const $ = id => document.getElementById(id);
+  const NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  async function load() {
+    const [m, p, r] = await Promise.all([
+      db.from('sales_monthly').select('*').order('sort_order', { ascending: true }),
+      db.from('sales_pipeline').select('*').order('sort_order', { ascending: true }),
+      db.from('sales_rank').select('*')
+    ]);
+    const error = m.error || p.error || r.error;
+    if (error) throw error;
+    return { monthly: m.data, pipeline: p.data, rank: r.data };
+  }
+
+  function drawCards(monthly, pipeline) {
+    const cur = monthly[monthly.length - 1];
+    const rev = Number(cur.revenue), target = Number(cur.target);
+    const cnt = pipeline.length ? Number(pipeline[pipeline.length - 1].count) : 0;
+    const rate = target > 0 ? rev / target * 100 : 0;
+    $('c-rev').textContent = won(rev);
+    $('c-bar').style.width = Math.min(rate, 100) + '%';
+    $('c-rate').textContent = '목표 대비 ' + rate.toFixed(1) + '% 달성';
+    $('c-target').textContent = won(target);
+    $('c-remain').textContent = rev >= target ? '목표 달성!' : '남은 금액 ' + won(target - rev);
+    $('c-avg').textContent = cnt > 0 ? won(rev / cnt) : '-';
+    $('c-cnt').textContent = cnt.toLocaleString('ko-KR') + '건';
+  }
+
+  function drawChart(monthly) {
+    const W = 600, H = 300, L = 10, R = 10, T = 24, B = 34;
+    const max = Math.max(...monthly.map(d => Math.max(Number(d.revenue), Number(d.target)))) * 1.1 || 1;
+    const slot = (W - L - R) / monthly.length;
+    const bw = slot * 0.55;
+    const y = v => T + (H - T - B) * (1 - v / max);
+    const svg = el('svg', { viewBox: `0 0 ${W} ${H}` });
+    svg.appendChild(el('line', { x1: L, x2: W - R, y1: H - B, y2: H - B, stroke: '#e5e7eb' }));
+    monthly.forEach((d, i) => {
+      const x = L + slot * i + (slot - bw) / 2;
+      const last = i === monthly.length - 1;
+      const top = y(Number(d.revenue));
+      svg.appendChild(el('rect', { x, y: top, width: bw, height: H - B - top, rx: 3, fill: last ? '#1d4ed8' : '#bfdbfe' }));
+      svg.appendChild(el('text', { x: x + bw / 2, y: H - B + 18, 'text-anchor': 'middle', 'font-size': 12, fill: '#6b7280' }, d.month));
+      if (last) svg.appendChild(el('text', { x: x + bw / 2, y: top - 6, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 700, fill: '#1d4ed8' }, Math.round(Number(d.revenue) / 10000).toLocaleString('ko-KR') + '만'));
+    });
+    const pts = monthly.map((d, i) => `${L + slot * i + slot / 2},${y(Number(d.target))}`).join(' ');
+    svg.appendChild(el('polyline', { points: pts, fill: 'none', stroke: '#111827', 'stroke-width': 1.5, 'stroke-dasharray': '5 4' }));
+    $('chart').appendChild(svg);
+    const note = document.createElement('div');
+    note.className = 'small';
+    note.textContent = '점선 = 월별 목표 / 진한 파랑 = 이번 달';
+    $('chart').appendChild(note);
+  }
+
+  function drawFunnel(pipeline) {
+    const box = $('funnel');
+    if (!pipeline.length) { box.textContent = '데이터 없음'; return; }
+    const first = Number(pipeline[0].count) || 1;
+    pipeline.forEach((d, i) => {
+      if (i > 0) {
+        const prev = Number(pipeline[i - 1].count);
+        const c = document.createElement('div');
+        c.className = 'conv';
+        c.textContent = '▼ 전환율 ' + (prev > 0 ? (Number(d.count) / prev * 100).toFixed(1) : '0.0') + '%';
+        box.appendChild(c);
+      }
+      const row = document.createElement('div');
+      row.className = 'funnel-row';
+      const bar = document.createElement('div');
+      bar.className = 'funnel-bar';
+      bar.style.width = Math.max(Number(d.count) / first * 100, 28) + '%';
+      bar.textContent = d.stage + ' ' + Number(d.count).toLocaleString('ko-KR');
+      row.appendChild(bar);
+      box.appendChild(row);
+    });
+    const last = Number(pipeline[pipeline.length - 1].count);
+    const f = document.createElement('div');
+    f.className = 'final';
+    f.append('최종 전환율 ');
+    const b = document.createElement('b');
+    b.textContent = (last / first * 100).toFixed(1) + '%';
+    f.appendChild(b);
+    box.appendChild(f);
+  }
+
+  function drawRank(kind, targetId, rows) {
+    const box = $(targetId);
+    const list = rows.filter(d => d.kind === kind).sort((a, b) => Number(b.amount) - Number(a.amount));
+    if (!list.length) { box.textContent = '데이터 없음'; return; }
+    const max = Number(list[0].amount) || 1;
+    list.forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'rank-row';
+      const name = document.createElement('div'); name.textContent = d.name;
+      const bg = document.createElement('div'); bg.className = 'rank-bar';
+      const fill = document.createElement('div'); fill.style.width = (Number(d.amount) / max * 100) + '%';
+      bg.appendChild(fill);
+      const amt = document.createElement('div'); amt.className = 'rank-amt'; amt.textContent = won(Number(d.amount));
+      row.append(name, bg, amt);
+      box.appendChild(row);
+    });
+  }
+
+  load().then(({ monthly, pipeline, rank }) => {
+    if (!monthly.length) { $('status').textContent = '월별 매출 데이터가 없어요.'; return; }
+    drawCards(monthly, pipeline);
+    drawChart(monthly);
+    drawFunnel(pipeline);
+    drawRank('person', 'rank-person', rank);
+    drawRank('product', 'rank-product', rank);
+    $('status').style.display = 'none';
+    $('app').style.display = 'block';
+  }).catch(e => {
+    $('status').className = 'msg err';
+    $('status').textContent = '데이터를 불러오지 못했어요: ' + (e.message || e);
+  });
+</script>
+</body>
+</html>
